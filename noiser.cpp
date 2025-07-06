@@ -194,28 +194,22 @@ int wmain(int argc, wchar_t* argv[]) {
 		g_device->CreateShaderResourceView(texCopy, &srvDesc, &inputTexSRV);
 		texCopy->Release();
 	}
-
 #ifdef _M_TEST
 	if (testMode) {
-		// ノイズなしテスト：そのまま出力して終了
-		wstring outPath = MakeNoisedFilename(full);  // suffix は "_noised" のまま
+		wstring outPath = MakeNoisedFilename(full);
 		SaveImageWIC(pixels, width, height, outPath.c_str());
 		CoUninitialize();
 		return 0;
 	}
 #endif
-
-	// ノイズ矩形生成
 	const UINT numRects = width * height / 10000;
 	mt19937 rng((UINT)time(nullptr));
 	uniform_int_distribution<UINT> drgb(0, 255), da(10, 40), pnoise(0, 10000);
 	vector<NoiseRect> rects(numRects);
 	for (ULONG_PTR y = 0; y < height; ++y) {
 		for (ULONG_PTR x = 0; x < width; ++x) {
-			// 0.01% の確率でノイズを付与（ごま塩レベル）
 			if (pnoise(rng) == 0) {
 				size_t idx = (static_cast<size_t>(y) * width + x) * 4;
-				// BGRA のそれぞれを lerp で軽くブレンド
 				float  a = da(rng) / 255.0f;
 				BYTE nr = static_cast<BYTE>(lerp(pixels[idx + 2], drgb(rng), a));
 				BYTE ng = static_cast<BYTE>(lerp(pixels[idx + 1], drgb(rng), a));
@@ -226,8 +220,6 @@ int wmain(int argc, wchar_t* argv[]) {
 			}
 		}
 	}
-
-	// StructuredBuffer
 	D3D11_BUFFER_DESC bd{};
 	bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 	bd.ByteWidth = sizeof(NoiseRect) * numRects;
@@ -245,7 +237,6 @@ int wmain(int argc, wchar_t* argv[]) {
 	ID3D11ShaderResourceView* rectSRV = nullptr;
 	g_device->CreateShaderResourceView(sb, &srvd, &rectSRV);
 
-	// 出力テクスチャ
 	D3D11_TEXTURE2D_DESC td{};
 	td.Width = width; td.Height = height; td.MipLevels = 1; td.ArraySize = 1;
 	td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -267,7 +258,6 @@ int wmain(int argc, wchar_t* argv[]) {
 		return 1;
 	}
 
-	// 定数バッファ
 	Params p{ width,height,numRects,(UINT)rng() };
 	D3D11_BUFFER_DESC cbd{ sizeof(Params),D3D11_USAGE_DEFAULT,D3D11_BIND_CONSTANT_BUFFER };
 	D3D11_SUBRESOURCE_DATA cbdInit{ &p,0,0 };
@@ -278,8 +268,8 @@ int wmain(int argc, wchar_t* argv[]) {
 
 	ID3D11Texture2D* inputTex = nullptr;
 	{
-		D3D11_TEXTURE2D_DESC tdCopy = td;              // td はもともとのテクスチャ定義
-		tdCopy.BindFlags = D3D11_BIND_SHADER_RESOURCE; // SRV 用バインドを追加
+		D3D11_TEXTURE2D_DESC tdCopy = td;
+		tdCopy.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 		tdCopy.Usage = D3D11_USAGE_DEFAULT;
 		ID3D11Texture2D* texCopy = nullptr;
 		g_device->CreateTexture2D(&tdCopy, &tdInit, &texCopy);
@@ -303,7 +293,6 @@ int wmain(int argc, wchar_t* argv[]) {
 	g_context->Dispatch((width + 15) / 16, (height + 15) / 16, 1);
 	g_context->Flush();
 
-	// 結果取得
 	D3D11_TEXTURE2D_DESC rd = td;
 	rd.Usage = D3D11_USAGE_STAGING; rd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; rd.BindFlags = 0;
 	ID3D11Texture2D* rTex = nullptr;
@@ -319,7 +308,6 @@ int wmain(int argc, wchar_t* argv[]) {
 	wstring noisedPath = MakeNoisedFilename(full);
 	SaveImageWIC(outpx, width, height, noisedPath.c_str());
 
-	// 解放
 	if (inputTexSRV) inputTexSRV->Release();
 	if (rectSRV) rectSRV->Release();
 	if (sb) sb->Release();
