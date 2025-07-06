@@ -35,10 +35,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
                 r.color.b / 255.0,
                 r.color.a / 255.0
             );
-			result[DTid.xy] = lerp(color, noiseColor, noiseColor.a); // ƒAƒ‹ƒtƒ@‚É‰ž‚¶‚Ä‰ÁŽZ
+			result[DTid.xy] = lerp(color, noiseColor, noiseColor.a);
 			return;
 		}
 	}
-
 	result[DTid.xy] = color;
 }
