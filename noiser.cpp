@@ -18,8 +18,7 @@
 #include <Windows.h>
 #include <WTypesbase.h>
 #include <cstring>
-#include <cstring>
-#include <cmath>
+#include <Shlwapi.h>
 
 #pragma comment(lib, "kernel32.lib")
 #pragma comment(lib, "user32.lib")
@@ -31,28 +30,27 @@
 #pragma comment(lib, "rpcrt4.lib")
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "Shlwapi.lib")
 
 using namespace std;
-
-typedef struct tagNoiseRect {
-	UINT pos[2];
-	UINT size;
-	UINT color[4];
-} NoiseRect, *pNoiseRect;
 
 typedef struct tagParams {
 	UINT width;
 	UINT height;
-	UINT numRects;
 	UINT seed;
+	UINT _pad; // メモリサイズ調整のために必須、実際は不使用
 } Params, *pParams;
 
 ID3D11Device* g_device = nullptr;
 ID3D11DeviceContext* g_context = nullptr;
 
 void InitD3D() {
+	UINT createDeviceFlags = 0;
+#ifdef _DEBUG
+	createDeviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
+#endif
 	HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-		0, nullptr, 0, D3D11_SDK_VERSION, &g_device, nullptr, &g_context);
+		createDeviceFlags, nullptr, 0, D3D11_SDK_VERSION, &g_device, nullptr, &g_context);
 	if (FAILED(hr)) {
 		TerminateProcess(GetCurrentProcess(), -1);
 		return;
@@ -133,11 +131,15 @@ void SaveImageWIC(const vector<BYTE>& data, UINT w, UINT h, LPCWSTR path) {
 	enc->CreateNewFrame(&frame, &props);
 	frame->Initialize(props);
 	frame->SetSize(w, h);
-	WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppRGBA;
+	WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppBGRA;
 	frame->SetPixelFormat(&fmt);
 	frame->WritePixels(h, w * 4, static_cast<UINT>(data.size()), const_cast<BYTE*>(data.data()));
 	frame->Commit(); enc->Commit();
-	props->Release(); frame->Release(); stream->Release(); enc->Release(); factory->Release();
+	if (props) props->Release();
+	if (frame) frame->Release();
+	if (stream) stream->Release();
+	if (enc) enc->Release();
+	if (factory) factory->Release();
 }
 
 wstring MakeNoisedFilename(const wstring& inputPath) {
@@ -145,6 +147,108 @@ wstring MakeNoisedFilename(const wstring& inputPath) {
 	size_t dot = output.find_last_of(L'.');
 	if (dot == wstring::npos) return output + L"_noised";
 	return output.substr(0, dot) + L"_noised" + output.substr(dot);
+}
+
+ID3D11ShaderResourceView* CreateTextureSRV(const vector<BYTE>& pixels, UINT w, UINT h) {
+	D3D11_TEXTURE2D_DESC td{};
+	td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+	td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	td.SampleDesc.Count = 1;
+	td.Usage = D3D11_USAGE_DEFAULT;
+	td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+	D3D11_SUBRESOURCE_DATA init{ pixels.data(), w * 4, 0 };
+	ID3D11Texture2D* tex = nullptr;
+	g_device->CreateTexture2D(&td, &init, &tex);
+	D3D11_SHADER_RESOURCE_VIEW_DESC srvd{};
+	srvd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+	srvd.Format = td.Format;
+	srvd.Texture2D.MipLevels = 1;
+	ID3D11ShaderResourceView* srv = nullptr;
+	g_device->CreateShaderResourceView(tex, &srvd, &srv);
+	if (tex) tex->Release();
+	return srv;
+}
+
+ID3D11UnorderedAccessView* CreateOutputUAV(const vector<BYTE>& pixels, UINT w, UINT h) {
+	D3D11_TEXTURE2D_DESC td{};
+	td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+	td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	td.SampleDesc.Count = 1;
+	td.Usage = D3D11_USAGE_DEFAULT;
+	td.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+	D3D11_SUBRESOURCE_DATA init{ pixels.data(), w * 4, 0 };
+	ID3D11Texture2D* tex = nullptr;
+	HRESULT hr = g_device->CreateTexture2D(&td, &init, &tex);
+	if (FAILED(hr)) {
+		return nullptr;
+	}
+	D3D11_UNORDERED_ACCESS_VIEW_DESC uavd{};
+	uavd.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+	uavd.Format = td.Format;
+	ID3D11UnorderedAccessView* uav = nullptr;
+	hr = g_device->CreateUnorderedAccessView(tex, &uavd, &uav);
+	if (tex) tex->Release();
+	if (FAILED(hr)) {
+		return nullptr;
+	}
+	return uav;
+}
+
+void ReadbackAndSave(ID3D11UnorderedAccessView* uav, UINT w, UINT h, LPCWSTR inPath) {
+	ID3D11Resource* res = nullptr;
+	uav->GetResource(&res);
+	if (!res) return;
+
+	ID3D11Texture2D* tex = nullptr;
+	HRESULT hr = res->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&tex);
+	if (FAILED(hr) || !tex) {
+		res->Release();
+		return;
+	}
+
+	D3D11_TEXTURE2D_DESC sd;
+	tex->GetDesc(&sd);
+	sd.Usage = D3D11_USAGE_STAGING;
+	sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+	sd.BindFlags = 0;
+	sd.MiscFlags = 0;
+
+	ID3D11Texture2D* staging = nullptr;
+	hr = g_device->CreateTexture2D(&sd, nullptr, &staging);
+	if (FAILED(hr) || !staging) {
+		tex->Release();
+		res->Release();
+		return;
+	}
+
+	g_context->CopyResource(staging, tex);
+
+	D3D11_MAPPED_SUBRESOURCE mr = {};
+	hr = g_context->Map(staging, 0, D3D11_MAP_READ, 0, &mr);
+	if (FAILED(hr)) {
+		staging->Release();
+		tex->Release();
+		res->Release();
+		return;
+	}
+
+	std::vector<BYTE> outp(w * h * 4);
+	BYTE* dst = outp.data();
+	BYTE* src = reinterpret_cast<BYTE*>(mr.pData);
+	for (UINT y = 0; y < h; ++y) {
+		memcpy(dst + y * w * 4, src + y * mr.RowPitch, static_cast<size_t>(w) * 4);
+	}
+	g_context->Unmap(staging, 0);
+
+	WCHAR out[MAX_PATH];
+	wcscpy_s(out, inPath);
+	PathRemoveExtensionW(out);
+	wcscat_s(out, L"_vhs.png");
+	SaveImageWIC(outp, w, h, out);
+
+	staging->Release();
+	tex->Release();
+	res->Release();
 }
 
 int wmain(int argc, wchar_t* argv[]) {
@@ -170,154 +274,46 @@ int wmain(int argc, wchar_t* argv[]) {
 	bmp->CopyPixels(&rect, width * 4, static_cast<UINT>(pixels.size()), pixels.data());
 	bmp->Release();
 
-	ID3D11ShaderResourceView* inputTexSRV = nullptr;
-	{
-		D3D11_TEXTURE2D_DESC tdSRV{};
-		tdSRV.Width = width;
-		tdSRV.Height = height;
-		tdSRV.MipLevels = 1;
-		tdSRV.ArraySize = 1;
-		tdSRV.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-		tdSRV.SampleDesc.Count = 1;
-		tdSRV.Usage = D3D11_USAGE_DEFAULT;
-		tdSRV.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+	auto srv = CreateTextureSRV(pixels, width, height);
+	auto uav = CreateOutputUAV(pixels, width, height);
 
-		D3D11_SUBRESOURCE_DATA initSRV{ pixels.data(), width * 4, 0 };
-		ID3D11Texture2D* texCopy = nullptr;
-		g_device->CreateTexture2D(&tdSRV, &initSRV, &texCopy);
 
-		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-		srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-		srvDesc.Format = tdSRV.Format;
-		srvDesc.Texture2D.MipLevels = 1;
-		srvDesc.Texture2D.MostDetailedMip = 0;
-		g_device->CreateShaderResourceView(texCopy, &srvDesc, &inputTexSRV);
-		texCopy->Release();
-	}
 #ifdef _M_TEST
 	if (testMode) {
-		wstring outPath = MakeNoisedFilename(full);
+		// ノイズなしテスト：そのまま出力して終了
+		wstring outPath = MakeNoisedFilename(full);  // suffix は "_vhs" のまま
 		SaveImageWIC(pixels, width, height, outPath.c_str());
 		CoUninitialize();
 		return 0;
 	}
 #endif
-	const UINT numRects = width * height / 10000;
+
 	mt19937 rng((UINT)time(nullptr));
-	uniform_int_distribution<UINT> drgb(0, 255), da(10, 40), pnoise(0, 10000);
-	vector<NoiseRect> rects(numRects);
-	for (ULONG_PTR y = 0; y < height; ++y) {
-		for (ULONG_PTR x = 0; x < width; ++x) {
-			if (pnoise(rng) == 0) {
-				size_t idx = (static_cast<size_t>(y) * width + x) * 4;
-				float  a = da(rng) / 255.0f;
-				BYTE nr = static_cast<BYTE>(lerp(pixels[idx + 2], drgb(rng), a));
-				BYTE ng = static_cast<BYTE>(lerp(pixels[idx + 1], drgb(rng), a));
-				BYTE nb = static_cast<BYTE>(lerp(pixels[idx + 0], drgb(rng), a));
-				pixels[idx + 2] = nr;
-				pixels[idx + 1] = ng;
-				pixels[idx + 0] = nb;
-			}
-		}
-	}
-	D3D11_BUFFER_DESC bd{};
-	bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-	bd.ByteWidth = sizeof(NoiseRect) * numRects;
-	bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-	bd.StructureByteStride = sizeof(NoiseRect);
-	bd.Usage = D3D11_USAGE_DEFAULT;
-	D3D11_SUBRESOURCE_DATA init{ rects.data(),0,0 };
-	ID3D11Buffer* sb = nullptr;
-	g_device->CreateBuffer(&bd, &init, &sb);
-
-	D3D11_SHADER_RESOURCE_VIEW_DESC srvd{};
-	srvd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-	srvd.Format = DXGI_FORMAT_UNKNOWN;
-	srvd.Buffer.NumElements = numRects;
-	ID3D11ShaderResourceView* rectSRV = nullptr;
-	g_device->CreateShaderResourceView(sb, &srvd, &rectSRV);
-
-	D3D11_TEXTURE2D_DESC td{};
-	td.Width = width; td.Height = height; td.MipLevels = 1; td.ArraySize = 1;
-	td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-	td.Usage = D3D11_USAGE_DEFAULT;
-	td.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-	td.SampleDesc.Count = 1;
-	D3D11_SUBRESOURCE_DATA tdInit{};
-	tdInit.pSysMem = pixels.data();
-	tdInit.SysMemPitch = width * 4;
-	ID3D11Texture2D* tex = nullptr;
-	g_device->CreateTexture2D(&td, &tdInit, &tex);
-	ID3D11UnorderedAccessView* uav = nullptr;
-	D3D11_UNORDERED_ACCESS_VIEW_DESC uavd{};
-	uavd.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
-	uavd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-	HRESULT hr = g_device->CreateUnorderedAccessView(tex, &uavd, &uav);
-	if (FAILED(hr)) {
-		TerminateProcess(GetCurrentProcess(), -1);
-		return 1;
-	}
-
-	Params p{ width,height,numRects,(UINT)rng() };
-	D3D11_BUFFER_DESC cbd{ sizeof(Params),D3D11_USAGE_DEFAULT,D3D11_BIND_CONSTANT_BUFFER };
-	D3D11_SUBRESOURCE_DATA cbdInit{ &p,0,0 };
-	ID3D11Buffer* pcb = nullptr;
-	g_device->CreateBuffer(&cbd, &cbdInit, &pcb);
+	Params p = { width, height, (UINT)rng() };
+	D3D11_BUFFER_DESC cbd{};
+	cbd.ByteWidth = sizeof(Params);
+	cbd.Usage = D3D11_USAGE_DEFAULT;
+	cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+	D3D11_SUBRESOURCE_DATA init{ &p, 0, 0 };
+	ID3D11Buffer* pcb;
+	g_device->CreateBuffer(&cbd, &init, &pcb);
 
 	auto shader = LoadComputeShaderFromResource();
-
-	ID3D11Texture2D* inputTex = nullptr;
-	{
-		D3D11_TEXTURE2D_DESC tdCopy = td;
-		tdCopy.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-		tdCopy.Usage = D3D11_USAGE_DEFAULT;
-		ID3D11Texture2D* texCopy = nullptr;
-		g_device->CreateTexture2D(&tdCopy, &tdInit, &texCopy);
-
-		D3D11_SHADER_RESOURCE_VIEW_DESC srvd2{};
-		srvd2.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-		srvd2.Format = tdCopy.Format;
-		srvd2.Texture2D.MipLevels = 1;
-		g_device->CreateShaderResourceView(texCopy, &srvd2, &inputTexSRV);
-		texCopy->Release();
-	}
-
-	ID3D11ShaderResourceView* srvs[2] = { rectSRV, inputTexSRV };
-
 	g_context->CSSetShader(shader, nullptr, 0);
-	g_context->CSSetShaderResources(0, 1, &rectSRV);
-	g_context->CSSetShaderResources(1, 1, &inputTexSRV);
-	g_context->CSSetShaderResources(0, 2, srvs);
-	g_context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
 	g_context->CSSetConstantBuffers(0, 1, &pcb);
+	g_context->CSSetShaderResources(1, 1, &srv);
+	g_context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
 	g_context->Dispatch((width + 15) / 16, (height + 15) / 16, 1);
 	g_context->Flush();
 
-	D3D11_TEXTURE2D_DESC rd = td;
-	rd.Usage = D3D11_USAGE_STAGING; rd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; rd.BindFlags = 0;
-	ID3D11Texture2D* rTex = nullptr;
-	g_device->CreateTexture2D(&rd, nullptr, &rTex);
-	g_context->CopyResource(rTex, tex);
-	D3D11_MAPPED_SUBRESOURCE mr;
-	g_context->Map(rTex, 0, D3D11_MAP_READ, 0, &mr);
-	vector<BYTE> outpx(width * height * 4);
-	const size_t imageSize = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
-	memcpy(outpx.data(), mr.pData, imageSize);
-	g_context->Unmap(rTex, 0);
+	ReadbackAndSave(uav, width, height, argv[1]);
 
-	wstring noisedPath = MakeNoisedFilename(full);
-	SaveImageWIC(outpx, width, height, noisedPath.c_str());
-
-	if (inputTexSRV) inputTexSRV->Release();
-	if (rectSRV) rectSRV->Release();
-	if (sb) sb->Release();
-	if (pcb) pcb->Release();
 	if (shader) shader->Release();
+	if (pcb) pcb->Release();
+	if (srv) srv->Release();
 	if (uav) uav->Release();
-	if (tex) tex->Release();
-	if (rTex) rTex->Release();
 	if (g_context) g_context->Release();
 	if (g_device) g_device->Release();
-	CoUninitialize();
+
 	return 0;
 }
