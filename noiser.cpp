@@ -1,13 +1,13 @@
 ﻿#pragma warning (disable: 6387)
 
-#define M_NOISER_VER L"v1.2"
+#define M_NOISER_VER L"v1.2.1"
 #include "resource.h"
 #include <combaseapi.h>
 #include <ctime>
 #include <d3d11.h>
 #include <d3dcommon.h>
 #include <dxgiformat.h>
-#ifndef DEBUG
+#ifndef _DEBUG
 #include <debugapi.h>
 #endif
 #include <fileapi.h>
@@ -17,7 +17,7 @@
 #include <processthreadsapi.h>
 #include <random>
 #ifdef _M_TEST
-#include <cstring>
+#include <string>
 #endif
 #include <vector>
 #include <wincodec.h>
@@ -99,8 +99,8 @@ ID3D11ComputeShader* LoadComputeShaderFromResource() {
 
 IWICBitmap* LoadImageWIC(LPCWSTR path, UINT& w, UINT& h) {
 	IWICImagingFactory* factory = nullptr;
-	HRESULT res = CoCreateInstance(CLSID_WICImagingFactory2, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
-	if (FAILED(res)) {
+	HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory2, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
+	if (FAILED(hr)) {
 		wprintf_s(L"Failed to CoCreateInstance\nat LoadImageWIC\n");
 		TerminateProcess(GetCurrentProcess(), 1);
 		return nullptr;
@@ -108,12 +108,18 @@ IWICBitmap* LoadImageWIC(LPCWSTR path, UINT& w, UINT& h) {
 	wchar_t full[MAX_PATH];
 	GetFullPathNameW(path, MAX_PATH, full, nullptr);
 	IWICBitmapDecoder* decoder = nullptr;
-	factory->CreateDecoderFromFilename(full, nullptr, GENERIC_READ,
+	hr = factory->CreateDecoderFromFilename(full, nullptr, GENERIC_READ,
 		WICDecodeMetadataCacheOnDemand, &decoder);
+	if (FAILED(hr)) {
+		wprintf_s(L"Failed to CreateDecoderFromFilename\nat LoadImageWIC\nThe reason this happened appears to be due to an invalid file name.\n");
+		if (factory) factory->Release();
+		TerminateProcess(GetCurrentProcess(), 1);
+		return nullptr;
+	}
 	GUID containerFormat = {};
 	if (FAILED(decoder->GetContainerFormat(&containerFormat)) || containerFormat != GUID_ContainerFormatPng) {
 		wprintf_s(L"Failed to GetContainerFormat\nat LoadImageWIC\n");
-		decoder->Release(); factory->Release();
+		if (decoder) decoder->Release(); if (factory) factory->Release();
 		TerminateProcess(GetCurrentProcess(), 1);
 		return nullptr;
 	}
@@ -284,7 +290,7 @@ void ReadbackAndSave(ID3D11UnorderedAccessView* uav, UINT w, UINT h, LPCWSTR inP
 }
 
 int wmain(int argc, wchar_t* argv[]) {
-#ifndef DEBUG
+#ifndef _DEBUG
 	if (IsDebuggerPresent()) return 0;
 #endif
 #ifdef _M_TEST
@@ -302,7 +308,12 @@ int wmain(int argc, wchar_t* argv[]) {
 #ifdef _M_TEST
 	bool testMode = (argc == 3 && wcscmp(argv[2], L"-test") == 0);
 #endif
-	wchar_t full[MAX_PATH]; GetFullPathNameW(argv[1], MAX_PATH, full, nullptr);
+	wchar_t full[MAX_PATH];
+	DWORD dw = GetFullPathNameW(argv[1], MAX_PATH, full, nullptr);
+	if (dw == 0) {
+		wprintf_s(L"Failed to GetFullPathNameW\nat wmain\n");
+		return 1;
+	}
 	UINT width, height;
 	HRESULT res = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 	if (FAILED(res)) {
