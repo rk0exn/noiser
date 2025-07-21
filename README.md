@@ -1,5 +1,6 @@
 # noiser
-**latest: v1.1(Updating)** <br>
+**latest: v1.2** 
+![noiserのアイコン](https://raw.githubusercontent.com/rk0exn/noiser/refs/heads/main/noiser_256.png "noiser")
 PNG画像にVHS風のノイズを付与します。(v1.0のみぶっ壊れです)<br>
 ~~本来であれば軽いごま塩フィルタ程度を想定していましたが、全くもって別物になってしまいました...~~ <br>
 v1.1はノイズの方法を大幅に変更したため、コード量もまあまあな差が出ています。
