@@ -1,24 +1,33 @@
 ﻿#pragma warning (disable: 6387)
 
+#define M_NOISER_VER L"v1.2"
 #include "resource.h"
 #include <combaseapi.h>
 #include <ctime>
 #include <d3d11.h>
 #include <d3dcommon.h>
 #include <dxgiformat.h>
+#ifndef DEBUG
+#include <debugapi.h>
+#endif
 #include <fileapi.h>
 #include <libloaderapi.h>
 #include <objbase.h>
 #include <OCIdl.h>
 #include <processthreadsapi.h>
 #include <random>
-#include <string>
+#ifdef _M_TEST
+#include <cstring>
+#endif
 #include <vector>
 #include <wincodec.h>
 #include <Windows.h>
 #include <WTypesbase.h>
-#include <cstring>
 #include <Shlwapi.h>
+#include <cstdio>
+#include <cstring>
+
+// このIncludeには推移的に必要なヘッダーも含めて全て含まれています。
 
 #pragma comment(lib, "kernel32.lib")
 #pragma comment(lib, "user32.lib")
@@ -44,7 +53,7 @@ typedef struct tagParams {
 ID3D11Device* g_device = nullptr;
 ID3D11DeviceContext* g_context = nullptr;
 
-void InitD3D() {
+void InitD3D11() {
 	UINT createDeviceFlags = 0;
 #ifdef _DEBUG
 	createDeviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
@@ -52,7 +61,8 @@ void InitD3D() {
 	HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
 		createDeviceFlags, nullptr, 0, D3D11_SDK_VERSION, &g_device, nullptr, &g_context);
 	if (FAILED(hr)) {
-		TerminateProcess(GetCurrentProcess(), -1);
+		wprintf_s(L"Failed to D3D11CreateDevice\nat InitD3D11\n");
+		TerminateProcess(GetCurrentProcess(), 1);
 		return;
 	}
 }
@@ -60,24 +70,28 @@ void InitD3D() {
 ID3D11ComputeShader* LoadComputeShaderFromResource() {
 	HRSRC hRes = FindResourceW(nullptr, MAKEINTRESOURCE(IDR_SHADER1), MAKEINTRESOURCE(10));
 	if (!hRes) {
-		TerminateProcess(GetCurrentProcess(), -1);
+		wprintf_s(L"Failed to FindResource\nat LoadComputeShderFromResource\n");
+		TerminateProcess(GetCurrentProcess(), 1);
 		return nullptr;
 	}
 	HGLOBAL hData = LoadResource(nullptr, hRes);
 	if (!hData) {
-		TerminateProcess(GetCurrentProcess(), -1);
+		wprintf_s(L"Failed to LoadResource\nat LoadComputeShaderFromResource\n");
+		TerminateProcess(GetCurrentProcess(), 1);
 		return nullptr;
 	}
 	void* pData = LockResource(hData);
 	DWORD size = SizeofResource(nullptr, hRes);
 	if (!pData || size == 0) {
-		TerminateProcess(GetCurrentProcess(), -1);
+		wprintf_s(L"Failed to LockResource or SizeofResource or both\nat LoadComputeShaderFromResource\n");
+		TerminateProcess(GetCurrentProcess(), 1);
 		return nullptr;
 	}
 	ID3D11ComputeShader* shader = nullptr;
 	HRESULT hr = g_device->CreateComputeShader(pData, size, nullptr, &shader);
 	if (FAILED(hr)) {
-		TerminateProcess(GetCurrentProcess(), -1);
+		wprintf_s(L"Failed to CreateComputeShader\nat LoadComputeShaderFromResource\n");
+		TerminateProcess(GetCurrentProcess(), 1);
 		return nullptr;
 	}
 	return shader;
@@ -87,7 +101,8 @@ IWICBitmap* LoadImageWIC(LPCWSTR path, UINT& w, UINT& h) {
 	IWICImagingFactory* factory = nullptr;
 	HRESULT res = CoCreateInstance(CLSID_WICImagingFactory2, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
 	if (FAILED(res)) {
-		TerminateProcess(GetCurrentProcess(), -1);
+		wprintf_s(L"Failed to CoCreateInstance\nat LoadImageWIC\n");
+		TerminateProcess(GetCurrentProcess(), 1);
 		return nullptr;
 	}
 	wchar_t full[MAX_PATH];
@@ -97,6 +112,7 @@ IWICBitmap* LoadImageWIC(LPCWSTR path, UINT& w, UINT& h) {
 		WICDecodeMetadataCacheOnDemand, &decoder);
 	GUID containerFormat = {};
 	if (FAILED(decoder->GetContainerFormat(&containerFormat)) || containerFormat != GUID_ContainerFormatPng) {
+		wprintf_s(L"Failed to GetContainerFormat\nat LoadImageWIC\n");
 		decoder->Release(); factory->Release();
 		TerminateProcess(GetCurrentProcess(), 1);
 		return nullptr;
@@ -118,7 +134,8 @@ void SaveImageWIC(const vector<BYTE>& data, UINT w, UINT h, LPCWSTR path) {
 	IWICImagingFactory* factory = nullptr;
 	HRESULT res = CoCreateInstance(CLSID_WICImagingFactory2, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
 	if (FAILED(res)) {
-		TerminateProcess(GetCurrentProcess(), -1);
+		wprintf_s(L"Failed to CoCreateInstance\nat SaveImageWIC\n");
+		TerminateProcess(GetCurrentProcess(), 1);
 		return;
 	}
 	IWICBitmapEncoder* enc = nullptr;
@@ -142,12 +159,14 @@ void SaveImageWIC(const vector<BYTE>& data, UINT w, UINT h, LPCWSTR path) {
 	if (factory) factory->Release();
 }
 
-wstring MakeNoisedFilename(const wstring& inputPath) {
+#ifdef _M_TEST
+wstring MakeVHSFilename(const wstring& inputPath) {
 	wstring output = inputPath;
 	size_t dot = output.find_last_of(L'.');
-	if (dot == wstring::npos) return output + L"_noised";
-	return output.substr(0, dot) + L"_noised" + output.substr(dot);
+	if (dot == wstring::npos) return output + L"_vhs";
+	return output.substr(0, dot) + L"_vhs" + output.substr(dot);
 }
+#endif
 
 ID3D11ShaderResourceView* CreateTextureSRV(const vector<BYTE>& pixels, UINT w, UINT h) {
 	D3D11_TEXTURE2D_DESC td{};
@@ -158,14 +177,22 @@ ID3D11ShaderResourceView* CreateTextureSRV(const vector<BYTE>& pixels, UINT w, U
 	td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 	D3D11_SUBRESOURCE_DATA init{ pixels.data(), w * 4, 0 };
 	ID3D11Texture2D* tex = nullptr;
-	g_device->CreateTexture2D(&td, &init, &tex);
+	HRESULT hr = g_device->CreateTexture2D(&td, &init, &tex);
+	if (FAILED(hr)) {
+		wprintf_s(L"Failed to create texture\nat CreateTextureSRV\n");
+		return nullptr;
+	}
 	D3D11_SHADER_RESOURCE_VIEW_DESC srvd{};
 	srvd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
 	srvd.Format = td.Format;
 	srvd.Texture2D.MipLevels = 1;
 	ID3D11ShaderResourceView* srv = nullptr;
-	g_device->CreateShaderResourceView(tex, &srvd, &srv);
+	hr = g_device->CreateShaderResourceView(tex, &srvd, &srv);
 	if (tex) tex->Release();
+	if (FAILED(hr)) {
+		wprintf_s(L"Failed to create shader resource view\nat CreateTextureSRV\n");
+		return nullptr;
+	}
 	return srv;
 }
 
@@ -180,6 +207,7 @@ ID3D11UnorderedAccessView* CreateOutputUAV(const vector<BYTE>& pixels, UINT w, U
 	ID3D11Texture2D* tex = nullptr;
 	HRESULT hr = g_device->CreateTexture2D(&td, &init, &tex);
 	if (FAILED(hr)) {
+		wprintf_s(L"Failed to create texture\nat CreateOutputUAV\n");
 		return nullptr;
 	}
 	D3D11_UNORDERED_ACCESS_VIEW_DESC uavd{};
@@ -189,6 +217,7 @@ ID3D11UnorderedAccessView* CreateOutputUAV(const vector<BYTE>& pixels, UINT w, U
 	hr = g_device->CreateUnorderedAccessView(tex, &uavd, &uav);
 	if (tex) tex->Release();
 	if (FAILED(hr)) {
+		wprintf_s(L"Failed to create unordered access view\nat CreateOutputUAV\n");
 		return nullptr;
 	}
 	return uav;
@@ -202,6 +231,7 @@ void ReadbackAndSave(ID3D11UnorderedAccessView* uav, UINT w, UINT h, LPCWSTR inP
 	ID3D11Texture2D* tex = nullptr;
 	HRESULT hr = res->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&tex);
 	if (FAILED(hr) || !tex) {
+		wprintf_s(L"Failed to query interface\nat ReadbackAndSave\n");
 		res->Release();
 		return;
 	}
@@ -216,6 +246,7 @@ void ReadbackAndSave(ID3D11UnorderedAccessView* uav, UINT w, UINT h, LPCWSTR inP
 	ID3D11Texture2D* staging = nullptr;
 	hr = g_device->CreateTexture2D(&sd, nullptr, &staging);
 	if (FAILED(hr) || !staging) {
+		wprintf_s(L"Failed to create texture\nat ReadbackAndSave\n");
 		tex->Release();
 		res->Release();
 		return;
@@ -226,6 +257,7 @@ void ReadbackAndSave(ID3D11UnorderedAccessView* uav, UINT w, UINT h, LPCWSTR inP
 	D3D11_MAPPED_SUBRESOURCE mr = {};
 	hr = g_context->Map(staging, 0, D3D11_MAP_READ, 0, &mr);
 	if (FAILED(hr)) {
+		wprintf_s(L"Failed to read map\nat ReadbackAndSave\n");
 		staging->Release();
 		tex->Release();
 		res->Release();
@@ -252,10 +284,19 @@ void ReadbackAndSave(ID3D11UnorderedAccessView* uav, UINT w, UINT h, LPCWSTR inP
 }
 
 int wmain(int argc, wchar_t* argv[]) {
+#ifndef DEBUG
+	if (IsDebuggerPresent()) return 0;
+#endif
 #ifdef _M_TEST
-	if (argc < 2 || argc > 4) return 1;
+	if (argc < 2 || argc > 4) {
+		wprintf_s(L"noiser %ls (Debug build)\nInvalid Parameter(s).\n", M_NOISER_VER);
+		return 1;
+	}
 #else
-	if (argc < 2 || argc > 3) return 1;
+	if (argc < 2 || argc > 3) {
+		wprintf_s(L"noiser %ls\nInvalid Parameter(s).\n", M_NOISER_VER);
+		return 1;
+	}
 #endif
 
 #ifdef _M_TEST
@@ -265,9 +306,10 @@ int wmain(int argc, wchar_t* argv[]) {
 	UINT width, height;
 	HRESULT res = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 	if (FAILED(res)) {
+		wprintf_s(L"Failed to CoInitializeEx\nat wmain\n");
 		return 1;
 	}
-	InitD3D();
+	InitD3D11();
 	IWICBitmap* bmp = LoadImageWIC(full, width, height);
 	vector<BYTE> pixels(width * height * 4);
 	WICRect rect = { 0, 0, static_cast<INT>(width), static_cast<INT>(height) };
@@ -275,15 +317,25 @@ int wmain(int argc, wchar_t* argv[]) {
 	bmp->Release();
 
 	auto srv = CreateTextureSRV(pixels, width, height);
+	if (!srv) {
+		wprintf_s(L"Failed to CreateTextureSRV\nat wmain\n");
+		return 1;
+	}
+
 	auto uav = CreateOutputUAV(pixels, width, height);
+	if (!uav) {
+		wprintf_s(L"Failed to CreateOutputUAV\nat wmain\n");
+		return 1;
+	}
 
 
 #ifdef _M_TEST
 	if (testMode) {
 		// ノイズなしテスト：そのまま出力して終了
-		wstring outPath = MakeNoisedFilename(full);  // suffix は "_vhs" のまま
+		wstring outPath = MakeVHSFilename(full);  // suffix は "_vhs" のまま
 		SaveImageWIC(pixels, width, height, outPath.c_str());
 		CoUninitialize();
+		wprintf_s(L"Test Generated.\n");
 		return 0;
 	}
 #endif
