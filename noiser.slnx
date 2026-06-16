@@ -1,3 +1,10 @@
 <Solution>
+  <Configurations>
+    <BuildType Name="Debug" />
+    <BuildType Name="Debug_Test" />
+    <BuildType Name="Release" />
+    <BuildType Name="Release_Test" />
+    <Platform Name="x64" />
+  </Configurations>
   <Project Path="noiser.vcxproj" />
 </Solution>
